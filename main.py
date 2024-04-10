@@ -3,81 +3,83 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import psutil
 import sqlite3
-import threading
 import time
 
-# Инициализация базы данных
+# Создаем или открываем базу данных SQLite и создаем таблицу, если она еще не существует
 conn = sqlite3.connect('cpu_usage.db')
 c = conn.cursor()
 c.execute('''
 CREATE TABLE IF NOT EXISTS cpu_usage (
-    timestamp TEXT,
+    timestamp REAL,
     cpu_percent REAL
 )
 ''')
 conn.commit()
 
-def log_cpu_usage(cpu_percent):
-    """Запись данных использования CPU в базу данных."""
-    timestamp = time.time()
-    c.execute("INSERT INTO cpu_usage (timestamp, cpu_percent) VALUES (?, ?)", (timestamp, cpu_percent))
-    conn.commit()
-
-def cpu_monitor(interval, window):
-    """Функция мониторинга CPU и отправки данных в главный поток."""
-    while True:
-        cpu_percent = psutil.cpu_percent(interval=None)
-        log_cpu_usage(cpu_percent)
-        window.write_event_value('-CPU-', cpu_percent)
-        time.sleep(interval)
-
-def draw_figure(canvas, figure):
-    """Добавление графика matplotlib в элемент Canvas PySimpleGUI."""
-    figure_canvas_agg = FigureCanvasTkAgg(figure, canvas)
-    figure_canvas_agg.draw()
-    figure_canvas_agg.get_tk_widget().pack(side='top', fill='both', expand=1)
-    return figure_canvas_agg
-
-# Определение макета GUI
+# Определение интерфейса пользователя PySimpleGUI
 layout = [
     [sg.Text('Real-time CPU Usage Graph')],
     [sg.Canvas(key='-CANVAS-')],
-    [sg.Text('Update Interval:'), sg.Combo(['1 second', '10 seconds', '1 minute'], default_value='1 second', key='-INTERVAL-')],
+    [sg.Text('Update Interval:'), sg.Combo(['1', '10', '60'], default_value='1', key='-INTERVAL-')],
     [sg.Button('Start', key='-START-'), sg.Button('Stop', key='-STOP-')]
 ]
 
 window = sg.Window('CPU Usage Monitor', layout, finalize=True)
 canvas_elem = window['-CANVAS-']
-canvas = canvas_elem.TKCanvas
 
-# Настройка графика matplotlib
+# Создаем фигуру и оси matplotlib один раз
 fig, ax = plt.subplots()
-ax.set_xlabel('Time')
-ax.set_ylabel('CPU Usage (%)')
-ax.set_ylim(0, 100)
+fig_agg = None
 
-monitor_thread = None
+# Инициализируем список для хранения данных загрузки CPU
 cpu_usage_data = []
 
-# Обработка событий окна
-while True:
-    event, values = window.read(timeout=100)
+def log_cpu_usage(cpu_percent):
+    """Функция для записи загрузки CPU в базу данных."""
+    timestamp = time.time()
+    c.execute("INSERT INTO cpu_usage (timestamp, cpu_percent) VALUES (?, ?)", (timestamp, cpu_percent))
+    conn.commit()
 
-    if event == sg.WINDOW_CLOSED:
+def draw_chart(fig, ax, cpu_usage_data):
+    """Функция для перерисовки графика с новыми данными."""
+    ax.clear()
+    ax.plot(cpu_usage_data, '-o', markersize=2)
+    ax.set_ylim(0, 100)
+    ax.set_xlabel('Measurements')
+    ax.set_ylabel('CPU Usage %')
+    global fig_agg
+    if fig_agg:
+        fig_agg.draw_idle()  # Используем draw_idle для обновления существующего графика
+    else:
+        # Первоначальное создание графика
+        fig_agg = FigureCanvasTkAgg(fig, canvas_elem.TKCanvas)
+        fig_agg.draw()
+        fig_agg.get_tk_widget().pack(side='top', fill='both', expand=1)
+
+monitoring = False
+last_update_time = time.time()
+update_interval = 1  # Интервал обновления в секундах
+
+while True:
+    event, values = window.read(timeout=10)
+    if event == sg.WIN_CLOSED:
         break
-    elif event == '-CPU-':
-        cpu_usage_data.append(values[event])
-        ax.clear()
-        ax.plot(cpu_usage_data, label='CPU Usage')
-        ax.legend()
-        draw_figure(canvas, fig)
     elif event == '-START-':
-        if monitor_thread is None or not monitor_thread.is_alive():
-            intervals = {'1 second': 1, '10 seconds': 10, '1 minute': 60}.get(values['-INTERVAL-'], 1)
-            monitor_thread = threading.Thread(target=cpu_monitor, args=(intervals, window), daemon=True)
-            monitor_thread.start()
-    elif event == '-STOP-' and monitor_thread:
-        monitor_thread.join(timeout=0.1)
+        monitoring = True
+        cpu_usage_data.clear()
+    elif event == '-STOP-':
+        monitoring = False
+
+    # Обновляем интервал обновления на основе выбора пользователя
+    update_interval = int(values['-INTERVAL-'])
+
+    # Проверяем, пора ли обновить график
+    if monitoring and (time.time() - last_update_time) >= update_interval:
+        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_usage_data.append(cpu_percent)
+        log_cpu_usage(cpu_percent)
+        draw_chart(fig, ax, cpu_usage_data)
+        last_update_time = time.time()
 
 window.close()
 conn.close()
